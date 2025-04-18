@@ -1,0 +1,11 @@
+st-pages
+openpyxl
+dataclasses
+typing
+streamlit
+pandas
+requests
+beautifulsoup4
+xlsxwriter
+lxml
+zipfile36
