@@ -14,7 +14,7 @@ def convert(response_json):
 
 
 def request(message_type, ceeps_id, usage_points_chunk, start_date, end_date):
-    base_url = "https://api.informatika.si/enotna-vstopna-tocka/merilni-podatki/meter-readings"
+    base_url = "https://api-test.informatika.si/enotna-vstopna-tocka/merilni-podatki/meter-readings"
 
     encoded_string = st.secrets['encoded_string_nme']
     if ceeps_id == "SFA":
@@ -59,6 +59,8 @@ def main():
     st.set_page_config(layout="centered")
 
     st.subheader("Meter readings DEV MODE")
+    
+    st.subheader("Spremenjen API klic na testno okolje: https://api-test.informatika.si/enotna-vstopna-tocka")
 
     ceeps_id = st.selectbox('CEEPS Identity', ('NME', 'SFA'))
 
