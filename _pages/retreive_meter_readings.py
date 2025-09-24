@@ -61,6 +61,9 @@ def main():
     st.subheader("Meter readings DEV MODE")
     
     st.markdown("Spremnjen API klic na testno okolje: https://api-test.informatika.si/enotna-vstopna-tocka")
+    st.markdown("Dokumentacija se nahaja na: https://docs.informatika.si/api/ - username: triglav, password: ljubljana")
+    st.markdown("NME credentials: ISNMENER - M3neRnI5Int3Gof!")
+    st.markdown("SFA credentials: ISSFOUND - 1SF0uNDbY1nteG!r4T")
 
     ceeps_id = st.selectbox('CEEPS Identity', ('NME', 'SFA'))
 
