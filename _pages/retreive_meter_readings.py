@@ -60,7 +60,7 @@ def main():
 
     st.subheader("Meter readings DEV MODE")
     
-    st.subheader("Spremenjen API klic na testno okolje: https://api-test.informatika.si/enotna-vstopna-tocka")
+    st.markdown("Spremnjen API klic na testno okolje: https://api-test.informatika.si/enotna-vstopna-tocka")
 
     ceeps_id = st.selectbox('CEEPS Identity', ('NME', 'SFA'))
 
