@@ -106,7 +106,7 @@ def main():
                     mime='application/json'
                 )
                 st.download_button(
-                    "Download ZIP",
+                    "Download zipped files",
                     type='primary',
                     data=get_zip(json_responses),
                     file_name='meter_readings.zip'
