@@ -14,7 +14,7 @@ def convert(response_json):
 
 
 def request(message_type, ceeps_id, usage_points_chunk, start_date, end_date):
-    base_url = "https://api-test.informatika.si/enotna-vstopna-tocka/merilni-podatki/meter-readingss"
+    base_url = "https://api-test.informatika.si/enotna-vstopna-tocka/merilni-podatki/meter-readings"
 
     encoded_string = st.secrets['encoded_string_nme']
     if ceeps_id == "SFA":
