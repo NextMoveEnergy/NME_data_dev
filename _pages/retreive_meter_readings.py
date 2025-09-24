@@ -58,7 +58,7 @@ def get_zip(json_responses):
 def main():
     st.set_page_config(layout="centered")
 
-    st.subheader("Meter readings")
+    st.subheader("Meter readings DEV MODE")
 
     ceeps_id = st.selectbox('CEEPS Identity', ('NME', 'SFA'))
 
