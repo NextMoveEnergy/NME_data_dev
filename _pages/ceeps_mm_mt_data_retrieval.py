@@ -4,117 +4,82 @@ import zipfile
 import pandas as pd
 import streamlit as st
 import requests
+import base64
 from io import BytesIO
-
-
-def convert(response_json):
-    json_file = BytesIO()
-    json_file.write(response_json)
-    return json_file
-
-
-def request(message_type, ceeps_id, usage_points_chunk, start_date, end_date):
-    base_url = "https://api.informatika.si/enotna-vstopna-tocka/merilni-podatki/meter-readings"
-
-    encoded_string = st.secrets['encoded_string_nme']
-    if ceeps_id == "SFA":
-        encoded_string = st.secrets['encoded_string_sfa']
-
-    headers = {
-        'accept': 'application/json',
-        'Authorization': f'Basic {encoded_string}'
-    }
-
-    if message_type == 'Daily 15 minute':
-        base_url += '?messageType=D1_15MIN'
-    elif message_type == 'Monthly 15 minute':
-        base_url += '?messageType=M1_15MIN'
-    elif message_type == 'Specify date':
-        base_url += f'?startTime={start_date}&endTime={end_date}'
-
-    usage_points_str = '&'.join(f"usagePoints={point}" for point in usage_points_chunk)
-    complete_url = f"{base_url}&{usage_points_str}"
-
-    try:
-        response = requests.get(complete_url, headers=headers, timeout=120)
-        response.raise_for_status()
-        return response
-    except requests.exceptions.Timeout:
-        st.error("⚠️ Timeout: Server took too long to respond.")
-    except requests.exceptions.RequestException as e:
-        st.error(f"⚠️ Request failed: {e}")
-    
-    return None  # return None on failure
-
-
-def get_zip(json_responses):
-    zip_buffer = BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-        for response_json in json_responses:
-            meter_readings = response_json.get("meterReadings", [])
-            for meter_reading in meter_readings:
-                usage_point = meter_reading["usagePoint"]
-                filename = f"{usage_point}.json"
-                json_data = json.dumps(meter_reading, separators=(",", ":"))
-                zip_file.writestr(filename, json_data)
-
-    zip_buffer.seek(0)
-
-    return zip_buffer
-
+import streamlit as st
 
 def main():
     st.set_page_config(layout="centered")
+    st.title("Zahteva za podatke MT/MM meritev")
 
-    st.subheader("CEEPS MT&MM data retrieval")
+    st.subheader("Podatki o merilni točki")
+    gsrn_mt = st.text_input("GSNR MT", "483111589999999999")
 
-    ceeps_id = st.selectbox('CEEPS Identity', ('NME', 'SFA'))
+    st.subheader("Podatki o plačniku / prodajalcu")
+    naziv = st.text_input("Naziv", "JANEZ NOVAK")
+    ulica = st.text_input("Ulica", "KRATKA ULICA")
+    hisna_stevilka = st.text_input("Hišna številka", "345")
+    postna_stevilka = st.text_input("Poštna številka", "9220")
+    posta = st.text_input("Pošta", "DOLGA VAS")
+    davcni_zavezanec = st.checkbox("Davčni zavezanec", value=False)
+    davcna_stevilka = st.text_input("Davčna številka", "11111119")
 
-    message_type = st.selectbox('Type of meter readings', ('Daily 15 minute', 'Monthly 15 minute', 'Specify date'))
+    ima_pooblastilo = st.checkbox("Ima veljavno pooblastilo za pridobivanje podatkov?", value=True)
 
-    start_date, end_date = "", ""
-    if message_type == 'Specify date':
-        col_left, col_right = st.columns(2)
-        with col_left:
-            start_date = st.date_input('Start date')
-        with col_right:
-            end_date = st.date_input('End date')
-
-    uploaded_file = st.file_uploader('Upload a file', type='xlsx')
+    st.subheader("Priloga (PDF)")
+    uploaded_file = st.file_uploader("Naloži PDF datoteko", type="pdf")
 
     if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file, converters={'Merilna točka': str})
+        file_content = uploaded_file.read()
+        encoded_file = base64.b64encode(file_content).decode("utf-8")
+        file_name = uploaded_file.name
 
-        usage_points_list = df['Merilna točka'].tolist()
+    if st.button("Pošlji zahtevo"):
+        if uploaded_file is None:
+            st.error("⚠️ Naloži PDF datoteko!")
+            return
 
-        if st.button('Retrieve', type='primary'):
-            chunk_size = 10
-            num_chunks = math.ceil(len(usage_points_list) / chunk_size)
-            json_responses = []
+        body = {
+            "gsrnMT": gsrn_mt,
+            "placnikAliProdajalec": {
+                "naziv": naziv,
+                "ulica": ulica,
+                "hisnaStevilka": hisna_stevilka,
+                "postnaStevilka": postna_stevilka,
+                "posta": posta,
+                "davcniZavezanec": davcni_zavezanec,
+                "davcnaStevilka": davcna_stevilka
+            },
+            "imaVeljavnoPooblastiloZaPridobivanjePodatkov": ima_pooblastilo,
+            "priloge": [
+                {
+                    "naziv": file_name,
+                    "datoteka": encoded_file,
+                    "vrstaDokumenta": "VLOGA_ZA_PRIKLJUCITEV_IN_DOSTOP_DO_OMREZJA"
+                }
+            ]
+        }
 
-            for i in range(num_chunks):
-                usage_points_chunk = usage_points_list[i * chunk_size:(i + 1) * chunk_size]
-                response = request(message_type, ceeps_id, usage_points_chunk, start_date, end_date)
-                if response is None:
-                    st.warning(f"Skipped chunk {i + 1} due to error.")
-                else:
-                    json_responses.append(response.json())
+        url = "https://api-test.informatika.si/enotna-vstopna-tocka/evidenca-zahtev/merilne-tocke/podatki-mt-mm-meritve"
+        encoded_string = st.secrets["encoded_string_nme"]  # ali sfa, po potrebi
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {encoded_string}"
+        }
 
-            if json_responses:
-                st.download_button(
-                    "Download",
-                    type='primary',
-                    data=json.dumps(json_responses),
-                    file_name='meter_readings.json',
-                    mime='application/json'
-                )
-                st.download_button(
-                    "Download ZIP",
-                    type='primary',
-                    data=get_zip(json_responses),
-                    file_name='meter_readings.zip'
-                )
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(body), timeout=120)
+            if response.status_code == 200:
+                st.success(f"Zahteva uspešno dodana! ID zahteve: {response.json().get('idZahteva')}")
+            elif response.status_code == 401:
+                st.error("⚠️ Neavtoriziran dostop do storitve (401)")
+            else:
+                st.error(f"Napaka: {response.status_code} - {response.text}")
+        except requests.exceptions.Timeout:
+            st.error("⚠️ Timeout: Server je predolgo časa nedosegljiv.")
+        except requests.exceptions.RequestException as e:
+            st.error(f"⚠️ Napaka pri pošiljanju zahtevka: {e}")
 
-
-main()
+if __name__ == "__main__":
+    main()
