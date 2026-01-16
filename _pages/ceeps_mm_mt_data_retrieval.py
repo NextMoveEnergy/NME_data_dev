@@ -10,6 +10,7 @@ import streamlit as st
 
 # --- Dovoljene vrste dokumentov ---
 VRSTE_DOKUMENTOV = [
+    "POOBLASTILO",
     "POOBLASTILO_ZA_PRIDOBITEV_MERILNIH_PODATKOV",
     "VLOGA_ZA_PRIKLJUCITEV_IN_DOSTOP_DO_OMREZJA",
     "DRUGA"
@@ -78,7 +79,7 @@ def main():
             "priloge": [
                 {
                     "naziv": file_name,
-                    "datoteka": "string",
+                    "datoteka": encoded_file,
                     "vrstaDokumenta": vrsta_dokumenta
                 }
             ]
