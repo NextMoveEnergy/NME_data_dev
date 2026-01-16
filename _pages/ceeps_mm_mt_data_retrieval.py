@@ -12,9 +12,11 @@ def main():
     st.set_page_config(layout="centered")
     st.title("Zahteva za podatke MT/MM meritev")
 
+    # --- Podatki o merilni točki ---
     st.subheader("Podatki o merilni točki")
     gsrn_mt = st.text_input("GSNR MT", "483111589999999999")
 
+    # --- Podatki o plačniku / prodajalcu ---
     st.subheader("Podatki o plačniku / prodajalcu")
     naziv = st.text_input("Naziv", "JANEZ NOVAK")
     ulica = st.text_input("Ulica", "KRATKA ULICA")
@@ -24,16 +26,27 @@ def main():
     davcni_zavezanec = st.checkbox("Davčni zavezanec", value=False)
     davcna_stevilka = st.text_input("Davčna številka", "11111119")
 
+    # --- Pooblastilo ---
     ima_pooblastilo = st.checkbox("Ima veljavno pooblastilo za pridobivanje podatkov?", value=True)
 
+    # --- Priloga ---
     st.subheader("Priloga (PDF)")
     uploaded_file = st.file_uploader("Naloži PDF datoteko", type="pdf")
+    vrsta_dokumenta = st.selectbox(
+        "Vrsta dokumenta",
+        (
+            "POOBLASTILO_ZA_PRIDOBITEV_MERILNIH_PODATKOV",
+            "VLOGA_ZA_PRIKLJUCITEV_IN_DOSTOP_DO_OMREZJA",
+            "DRUGA"
+        )
+    )
 
     if uploaded_file is not None:
         file_content = uploaded_file.read()
         encoded_file = base64.b64encode(file_content).decode("utf-8")
         file_name = uploaded_file.name
 
+    # --- Pošlji zahtevo ---
     if st.button("Pošlji zahtevo"):
         if uploaded_file is None:
             st.error("⚠️ Naloži PDF datoteko!")
@@ -55,7 +68,7 @@ def main():
                 {
                     "naziv": file_name,
                     "datoteka": encoded_file,
-                    "vrstaDokumenta": "VLOGA_ZA_PRIKLJUCITEV_IN_DOSTOP_DO_OMREZJA"
+                    "vrstaDokumenta": vrsta_dokumenta
                 }
             ]
         }
