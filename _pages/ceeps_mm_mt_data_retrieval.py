@@ -78,7 +78,7 @@ def main():
             "priloge": [
                 {
                     "naziv": file_name,
-                    "datoteka": encoded_file,
+                    "datoteka": "string",
                     "vrstaDokumenta": vrsta_dokumenta
                 }
             ]
