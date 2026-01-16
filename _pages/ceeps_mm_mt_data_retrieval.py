@@ -8,6 +8,13 @@ import base64
 from io import BytesIO
 import streamlit as st
 
+# --- Dovoljene vrste dokumentov ---
+VRSTE_DOKUMENTOV = [
+    "POOBLASTILO_ZA_PRIDOBITEV_MERILNIH_PODATKOV",
+    "VLOGA_ZA_PRIKLJUCITEV_IN_DOSTOP_DO_OMREZJA",
+    "DRUGA"
+]
+
 def main():
     st.set_page_config(layout="centered")
     st.title("Zahteva za podatke MT/MM meritev")
@@ -32,14 +39,7 @@ def main():
     # --- Priloga ---
     st.subheader("Priloga (PDF)")
     uploaded_file = st.file_uploader("Naloži PDF datoteko", type="pdf")
-    vrsta_dokumenta = st.selectbox(
-        "Vrsta dokumenta",
-        (
-            "POOBLASTILO_ZA_PRIDOBITEV_MERILNIH_PODATKOV",
-            "VLOGA_ZA_PRIKLJUCITEV_IN_DOSTOP_DO_OMREZJA",
-            "DRUGA"
-        )
-    )
+    vrsta_dokumenta = st.selectbox("Vrsta dokumenta", VRSTE_DOKUMENTOV)
 
     if uploaded_file is not None:
         file_content = uploaded_file.read()
@@ -48,10 +48,21 @@ def main():
 
     # --- Pošlji zahtevo ---
     if st.button("Pošlji zahtevo"):
+
+        # --- VALIDACIJA ---
         if uploaded_file is None:
             st.error("⚠️ Naloži PDF datoteko!")
             return
 
+        if len(gsrn_mt) != 18 or not gsrn_mt.isdigit():
+            st.error("⚠️ GSRN MT mora biti 18-mestna številka!")
+            return
+
+        if vrsta_dokumenta not in VRSTE_DOKUMENTOV:
+            st.error("⚠️ Izberi pravilno vrsto dokumenta!")
+            return
+
+        # --- JSON za POST ---
         body = {
             "gsrnMT": gsrn_mt,
             "placnikAliProdajalec": {
@@ -73,6 +84,11 @@ def main():
             ]
         }
 
+        # --- PRIKAZ JSON ZA DEBUG ---
+        st.subheader("JSON, ki se pošilja")
+        st.json(body)
+
+        # --- Pošiljanje POST ---
         url = "https://api-test.informatika.si/enotna-vstopna-tocka/evidenca-zahtev/merilne-tocke/podatki-mt-mm-meritve"
         encoded_string = st.secrets["encoded_string_nme"]  # ali sfa, po potrebi
         headers = {
