@@ -90,7 +90,7 @@ def main():
         st.json(body)
 
         # --- Pošiljanje POST ---
-        url = "https://api-test.informatika.si/enotna-vstopna-tocka/evidenca-zahtev/merilne-tocke/podatki-mt-mm-meritve"
+        url = "https://api.informatika.si/enotna-vstopna-tocka/evidenca-zahtev/merilne-tocke/podatki-mt-mm-meritve"
         encoded_string = st.secrets["encoded_string_nme"]  # ali sfa, po potrebi
         headers = {
             "accept": "application/json",
