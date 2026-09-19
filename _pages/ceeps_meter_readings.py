@@ -11,7 +11,7 @@ import streamlit as st
 
 PAGE_TITLE = "CEEPS Meter Readings"
 DEFAULT_API_URL = (
-    "https://api-test.informatika.si/"
+    "https://api.informatika.si/"
     "enotna-vstopna-tocka/merilni-podatki/meter-readings"
 )
 USAGE_POINT_COLUMN = "Merilna točka"
