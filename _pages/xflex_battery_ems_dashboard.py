@@ -455,6 +455,20 @@ def fmt_kwh(value: float | None) -> str:
     return "—" if value is None else f"{value:,.2f} kWh"
 
 
+def wh_to_kwh(value: Any) -> float | None:
+    wh = number(value)
+    if wh is None:
+        return None
+    return wh / 1000.0
+
+
+def kw_to_15min_kwh(value_kw: float | None) -> float | None:
+    """Convert a kW setpoint/power value to its 15-minute energy equivalent."""
+    if value_kw is None:
+        return None
+    return value_kw * 0.25
+
+
 def fmt_capacity(value_wh: float | None) -> str:
     return "—" if value_wh is None else f"{value_wh / 1000:,.0f} kWh"
 
@@ -483,6 +497,11 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
     """
     Exact mapping from the supplied signal table.
 
+    Each running 15-minute API field is stored as energy in Wh. The dashboard
+    therefore shows BOTH:
+      - accumulated energy in the current interval (kWh), and
+      - average power so far in the current interval (kW).
+
     [0] GRID
       source_energy_*[0]   = imported energy FROM grid
       consumer_energy_*[0] = exported energy TO grid
@@ -506,34 +525,55 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
         "grid_import_kw": running_interval_wh_to_kw(
             data.get("source_energy_15min[0]"), ts
         ),
+        "grid_import_kwh": wh_to_kwh(
+            data.get("source_energy_15min[0]")
+        ),
         "grid_export_kw": running_interval_wh_to_kw(
             data.get("consumer_energy_15min[0]"), ts
         ),
+        "grid_export_kwh": wh_to_kwh(
+            data.get("consumer_energy_15min[0]")
+        ),
         "grid_import_last_kw": completed_15min_wh_to_kw(
+            data.get("source_energy_15min_last[0]")
+        ),
+        "grid_import_last_kwh": wh_to_kwh(
             data.get("source_energy_15min_last[0]")
         ),
         "grid_export_last_kw": completed_15min_wh_to_kw(
             data.get("consumer_energy_15min_last[0]")
         ),
+        "grid_export_last_kwh": wh_to_kwh(
+            data.get("consumer_energy_15min_last[0]")
+        ),
         "battery_discharge_kw": running_interval_wh_to_kw(
             data.get("source_energy_15min[7]"), ts
+        ),
+        "battery_discharge_kwh": wh_to_kwh(
+            data.get("source_energy_15min[7]")
         ),
         "battery_charge_kw": running_interval_wh_to_kw(
             data.get("consumer_energy_15min[7]"), ts
         ),
+        "battery_charge_kwh": wh_to_kwh(
+            data.get("consumer_energy_15min[7]")
+        ),
         "battery_discharge_last_kw": completed_15min_wh_to_kw(
             data.get("source_energy_15min_last[7]")
         ),
+        "battery_discharge_last_kwh": wh_to_kwh(
+            data.get("source_energy_15min_last[7]")
+        ),
         "battery_charge_last_kw": completed_15min_wh_to_kw(
+            data.get("consumer_energy_15min_last[7]")
+        ),
+        "battery_charge_last_kwh": wh_to_kwh(
             data.get("consumer_energy_15min_last[7]")
         ),
         "pv_channels": [],
     }
 
     if plant_id == "SK_Skrlj_1":
-        # [4] is explicitly marked "Ignore this field (Debug values)".
-        # [5] is the documented real PV channel: M1.3, PV 3,
-        # SK Škrlj, SolarEdge, 487 kW.
         result["pv_channels"] = [
             {
                 "name": "PV · SK Škrlj SolarEdge",
@@ -543,7 +583,13 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
                 "current_kw": running_interval_wh_to_kw(
                     data.get("source_energy_15min[5]"), ts
                 ),
+                "current_kwh": wh_to_kwh(
+                    data.get("source_energy_15min[5]")
+                ),
                 "last_kw": completed_15min_wh_to_kw(
+                    data.get("source_energy_15min_last[5]")
+                ),
+                "last_kwh": wh_to_kwh(
                     data.get("source_energy_15min_last[5]")
                 ),
             }
@@ -559,7 +605,13 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
                 "current_kw": running_interval_wh_to_kw(
                     data.get("source_energy_15min[4]"), ts
                 ),
+                "current_kwh": wh_to_kwh(
+                    data.get("source_energy_15min[4]")
+                ),
                 "last_kw": completed_15min_wh_to_kw(
+                    data.get("source_energy_15min_last[4]")
+                ),
+                "last_kwh": wh_to_kwh(
                     data.get("source_energy_15min_last[4]")
                 ),
             },
@@ -571,7 +623,13 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
                 "current_kw": running_interval_wh_to_kw(
                     data.get("source_energy_15min[5]"), ts
                 ),
+                "current_kwh": wh_to_kwh(
+                    data.get("source_energy_15min[5]")
+                ),
                 "last_kw": completed_15min_wh_to_kw(
+                    data.get("source_energy_15min_last[5]")
+                ),
+                "last_kwh": wh_to_kwh(
                     data.get("source_energy_15min_last[5]")
                 ),
             },
@@ -693,9 +751,11 @@ def render_flow_card(
     label: str,
     current_kw: float | None,
     *,
+    current_kwh: float | None = None,
     meter: str,
     signal: str,
     previous_kw: float | None = None,
+    previous_kwh: float | None = None,
     installed_kw: float | None = None,
 ) -> None:
     capacity_text = (
@@ -711,10 +771,15 @@ def render_flow_card(
                 {label}
                 <span class="signal-chip">{meter}</span>
             </div>
+
             <div class="flow-value">{fmt_kw(current_kw)}</div>
+            <div style="font-size:1.15rem;font-weight:700;margin-top:-.15rem;margin-bottom:.35rem;">
+                {fmt_kwh(current_kwh)}
+            </div>
+
             <div class="small-note">
-                Current 15-min interval average so far{capacity_text}<br>
-                Previous full 15 min: {fmt_kw(previous_kw)}<br>
+                Current 15-min interval: average power so far + accumulated energy{capacity_text}<br>
+                Previous full 15 min: {fmt_kw(previous_kw)} · {fmt_kwh(previous_kwh)}<br>
                 Signal: {signal}
             </div>
         </div>
@@ -725,20 +790,14 @@ def render_flow_card(
 
 def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
     """
-    Render the two documented grid meters separately and, when both are
-    available, also show their combined import/export.
-
-    Combined site values are calculated as:
-        total import = SK1 import + SK2 import
-        total export = SK1 export + SK2 export
-
-    No netting is applied so that import and export remain transparent.
+    Show SK1 and SK2 grid meters separately, plus their combined totals.
+    Both power (kW) and 15-minute energy (kWh) are displayed.
     """
 
     st.subheader("Grid overview")
     st.caption(
-        "Grid meters are shown separately for SK1 and SK2, with an additional "
-        "combined total calculated as the sum of both meters."
+        "Each grid meter is shown separately, plus the combined SK1 + SK2 total. "
+        "Every flow is shown in both kW and kWh."
     )
 
     grid_values: dict[str, dict[str, Any]] = {}
@@ -758,18 +817,29 @@ def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
             "import_kw": running_interval_wh_to_kw(
                 data.get("source_energy_15min[0]"), ts
             ),
+            "import_kwh": wh_to_kwh(
+                data.get("source_energy_15min[0]")
+            ),
             "export_kw": running_interval_wh_to_kw(
                 data.get("consumer_energy_15min[0]"), ts
             ),
+            "export_kwh": wh_to_kwh(
+                data.get("consumer_energy_15min[0]")
+            ),
             "import_last_kw": completed_15min_wh_to_kw(
+                data.get("source_energy_15min_last[0]")
+            ),
+            "import_last_kwh": wh_to_kwh(
                 data.get("source_energy_15min_last[0]")
             ),
             "export_last_kw": completed_15min_wh_to_kw(
                 data.get("consumer_energy_15min_last[0]")
             ),
+            "export_last_kwh": wh_to_kwh(
+                data.get("consumer_energy_15min_last[0]")
+            ),
         }
 
-    # Individual grid meters
     meter_cols = st.columns(2)
 
     for col, plant_id, title in zip(
@@ -789,20 +859,23 @@ def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
             render_flow_card(
                 "Import from grid",
                 values["import_kw"],
+                current_kwh=values["import_kwh"],
                 meter=values["meter"],
                 signal="source_energy_15min[0]",
                 previous_kw=values["import_last_kw"],
+                previous_kwh=values["import_last_kwh"],
             )
 
             render_flow_card(
                 "Export to grid",
                 values["export_kw"],
+                current_kwh=values["export_kwh"],
                 meter=values["meter"],
                 signal="consumer_energy_15min[0]",
                 previous_kw=values["export_last_kw"],
+                previous_kwh=values["export_last_kwh"],
             )
 
-    # Combined total only when both meters are available.
     sk1 = grid_values.get("SK_Skrlj_1")
     sk2 = grid_values.get("SK_Skrlj_2")
 
@@ -814,13 +887,22 @@ def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
                 return None
             return a + b
 
-        total_import = add_optional(sk1["import_kw"], sk2["import_kw"])
-        total_export = add_optional(sk1["export_kw"], sk2["export_kw"])
-        total_import_last = add_optional(
+        total_import_kw = add_optional(sk1["import_kw"], sk2["import_kw"])
+        total_import_kwh = add_optional(sk1["import_kwh"], sk2["import_kwh"])
+        total_export_kw = add_optional(sk1["export_kw"], sk2["export_kw"])
+        total_export_kwh = add_optional(sk1["export_kwh"], sk2["export_kwh"])
+
+        total_import_last_kw = add_optional(
             sk1["import_last_kw"], sk2["import_last_kw"]
         )
-        total_export_last = add_optional(
+        total_import_last_kwh = add_optional(
+            sk1["import_last_kwh"], sk2["import_last_kwh"]
+        )
+        total_export_last_kw = add_optional(
             sk1["export_last_kw"], sk2["export_last_kw"]
+        )
+        total_export_last_kwh = add_optional(
+            sk1["export_last_kwh"], sk2["export_last_kwh"]
         )
 
         total_cols = st.columns(3)
@@ -828,51 +910,65 @@ def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
         with total_cols[0]:
             render_flow_card(
                 "Total grid import",
-                total_import,
+                total_import_kw,
+                current_kwh=total_import_kwh,
                 meter="M1.1 + M2.1",
                 signal="Σ source_energy_15min[0]",
-                previous_kw=total_import_last,
+                previous_kw=total_import_last_kw,
+                previous_kwh=total_import_last_kwh,
             )
 
         with total_cols[1]:
             render_flow_card(
                 "Total grid export",
-                total_export,
+                total_export_kw,
+                current_kwh=total_export_kwh,
                 meter="M1.1 + M2.1",
                 signal="Σ consumer_energy_15min[0]",
-                previous_kw=total_export_last,
+                previous_kw=total_export_last_kw,
+                previous_kwh=total_export_last_kwh,
             )
 
         with total_cols[2]:
-            if total_import is not None and total_export is not None:
-                net_kw = total_import - total_export
+            if (
+                total_import_kw is not None
+                and total_export_kw is not None
+                and total_import_kwh is not None
+                and total_export_kwh is not None
+            ):
+                net_kw = total_import_kw - total_export_kw
+                net_kwh = total_import_kwh - total_export_kwh
+
                 if net_kw > 0.05:
                     net_label = "Net import"
-                    net_value = net_kw
+                    display_kw = net_kw
+                    display_kwh = max(net_kwh, 0)
                 elif net_kw < -0.05:
                     net_label = "Net export"
-                    net_value = abs(net_kw)
+                    display_kw = abs(net_kw)
+                    display_kwh = abs(min(net_kwh, 0))
                 else:
                     net_label = "Net grid flow"
-                    net_value = 0.0
+                    display_kw = 0.0
+                    display_kwh = abs(net_kwh)
 
-                st.metric(net_label, fmt_kw(net_value))
+                st.metric(net_label, fmt_kw(display_kw))
+                st.metric("15-min net energy", fmt_kwh(display_kwh))
                 st.caption(
-                    "Calculated as total import − total export. "
-                    "This is a derived dashboard value."
+                    "Derived from total import − total export. "
+                    "kWh is the accumulated current 15-minute interval."
                 )
             else:
                 st.metric("Net grid flow", "—")
-                st.caption("Not enough data to calculate the combined net flow.")
+                st.metric("15-min net energy", "—")
 
         st.markdown(
             """
             <div class="section-note">
-                <b>Combined grid:</b> Total import is calculated as
-                <b>SK1 import + SK2 import</b>, and total export as
-                <b>SK1 export + SK2 export</b>. The dashboard also shows the
-                derived net result separately. Individual import/export values
-                remain visible so no information is hidden by netting.
+                <b>Units:</b> kW is the average power so far in the running
+                15-minute interval. kWh is the actual accumulated energy in that
+                same interval. This makes the live values directly comparable
+                with the kWh/15min schedule.
             </div>
             """,
             unsafe_allow_html=True,
@@ -909,9 +1005,11 @@ def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
                 render_flow_card(
                     pv["name"],
                     pv["current_kw"],
+                    current_kwh=pv["current_kwh"],
                     meter=pv["meter"],
                     signal=pv["signal"],
                     previous_kw=pv["last_kw"],
+                    previous_kwh=pv["last_kwh"],
                     installed_kw=pv["installed_kw"],
                 )
 
@@ -930,39 +1028,55 @@ def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
         render_flow_card(
             "Battery charging",
             flows["battery_charge_kw"],
+            current_kwh=flows["battery_charge_kwh"],
             meter=battery_meter,
             signal="consumer_energy_15min[7]",
             previous_kw=flows["battery_charge_last_kw"],
+            previous_kwh=flows["battery_charge_last_kwh"],
         )
     with b2:
         render_flow_card(
             "Battery discharging",
             flows["battery_discharge_kw"],
+            current_kwh=flows["battery_discharge_kwh"],
             meter=battery_meter,
             signal="source_energy_15min[7]",
             previous_kw=flows["battery_discharge_last_kw"],
+            previous_kwh=flows["battery_discharge_last_kwh"],
         )
     with b3:
+        setpoint_kw = setpoint_w / 1000 if setpoint_w is not None else None
+        setpoint_15min_kwh = kw_to_15min_kwh(setpoint_kw)
+
         st.metric(
             "Actual EMS setpoint",
-            fmt_kw(setpoint_w / 1000 if setpoint_w is not None else None),
+            fmt_kw(setpoint_kw),
             help=(
                 "plant_setpoint_used [W]. Negative = export/discharging; "
                 "positive = import/charging."
             ),
         )
+        st.metric(
+            "15-min energy equivalent",
+            fmt_kwh(setpoint_15min_kwh),
+            help=(
+                "Derived as setpoint kW × 0.25 h. This is the energy that would "
+                "result if the current setpoint stayed constant for the full 15 minutes."
+            ),
+        )
         st.caption(
-            "Controller setpoint, not a measured instantaneous battery-power signal."
+            "The kWh value here is derived from the controller setpoint; it is not "
+            "a separate measured energy signal."
         )
 
     st.markdown(
         """
         <div class="section-note">
-            <b>About the kW values:</b> the API table provides accumulated Wh in
-            the running 15-minute interval, not true instantaneous PV/grid power.
-            The dashboard therefore calculates average kW <b>so far in the current
-            quarter-hour</b>. It also shows the completed previous 15-minute average,
-            which is the most stable comparable power value available from these fields.
+            <b>About kW and kWh:</b> the API provides accumulated Wh in the
+            running 15-minute interval. The dashboard now shows that measured energy
+            directly as <b>kWh</b>, and also calculates average <b>kW</b> so far in
+            the same interval. For the previous completed 15-minute interval, both
+            average kW and measured kWh are shown as well.
         </div>
         """,
         unsafe_allow_html=True,
