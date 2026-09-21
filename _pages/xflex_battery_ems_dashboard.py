@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import altair as alt
@@ -32,6 +33,7 @@ API_URL = "https://hiqapi.robotina.com/nextMoveEnergy"
 DEFAULT_PLANTS = ["SK_Skrlj_1", "SK_Skrlj_2"]
 REQUEST_TIMEOUT_SECONDS = 20
 REFRESH_INTERVAL = "60s"
+LOCAL_TZ = ZoneInfo("Europe/Ljubljana")
 
 
 st.set_page_config(
@@ -120,6 +122,49 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# ---------------------------------------------------------------------
+# Time helpers
+# ---------------------------------------------------------------------
+
+def now_ljubljana() -> datetime:
+    """Return the current timezone-aware time in Ljubljana."""
+    return datetime.now(LOCAL_TZ)
+
+
+def format_ljubljana_time(value: Any) -> str:
+    """
+    Convert API UTC timestamps to Europe/Ljubljana.
+
+    The xFLEX API field is named UTCtimeStamp and the documentation describes
+    it as UTC. Naive API timestamps are therefore interpreted as UTC first.
+    """
+    if value in (None, "", "?"):
+        return "—"
+
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return raw
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def current_schedule_index(local_now: datetime | None = None) -> int:
+    """Return the current 15-minute schedule slot index (0..95) in Ljubljana time."""
+    local_now = local_now or now_ljubljana()
+    return (local_now.hour * 60 + local_now.minute) // 15
 
 
 # ---------------------------------------------------------------------
@@ -386,6 +431,7 @@ def schedule_dataframe(data: dict[str, Any], prefix: str) -> pd.DataFrame:
 
         rows.append(
             {
+                "Index": i,
                 "Interval": f"{hour:02d}:{minute:02d}–{end_hour:02d}:{end_minute:02d}",
                 "Start": f"{hour:02d}:{minute:02d}",
                 "Energy (kWh/15 min)": kwh,
@@ -434,7 +480,7 @@ def render_soc_card(
                 &nbsp;•&nbsp;
                 EMS state: {operating_mode(setpoint_w)}
                 &nbsp;•&nbsp;
-                API timestamp: {api_timestamp or "—"}
+                API timestamp (Ljubljana): {format_ljubljana_time(api_timestamp)}
             </div>
         </div>
         """,
@@ -585,6 +631,22 @@ def render_schedule(plant_id: str) -> None:
         m2.metric("Scheduled discharge", fmt_kwh(discharge_kwh))
         m3.metric("Intervals received", f"{valid}/96")
 
+        if day_choice == "Today":
+            local_now = now_ljubljana()
+            slot_index = current_schedule_index(local_now)
+            current_row = df.loc[df["Index"] == slot_index].iloc[0]
+            current_energy = current_row["Energy (kWh/15 min)"]
+            current_action = current_row["Action"]
+            current_power = current_row["Average power (kW)"]
+
+            st.info(
+                f"Current Ljubljana time: "
+                f"{local_now.strftime('%Y-%m-%d %H:%M:%S %Z')} · "
+                f"Current schedule interval: {current_row['Interval']} · "
+                f"Scheduled action: {current_action} · "
+                f"Scheduled average power: {fmt_kw(current_power)}"
+            )
+
         chart_df = df.dropna(subset=["Average power (kW)"]).copy()
 
         chart = (
@@ -634,8 +696,9 @@ def render_schedule(plant_id: str) -> None:
         )
 
         st.caption(
-            "Schedule sign convention from the API documentation: "
-            "negative = battery discharging/export, positive = charging/import."
+            "Schedule intervals are shown in Europe/Ljubljana local time. "
+            "Sign convention from the API documentation: negative = battery "
+            "discharging/export, positive = charging/import."
         )
 
 
@@ -649,7 +712,7 @@ st.markdown(
 )
 st.markdown(
     '<div class="dashboard-subtitle">'
-    'Live battery SOC, PV/grid energy flow and uploaded battery schedules'
+    'Live battery SOC, PV/grid energy flow and uploaded battery schedules · Europe/Ljubljana time'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -673,7 +736,7 @@ def live_dashboard() -> None:
         st.warning("Select at least one plant in the sidebar.")
         return
 
-    polled_at = datetime.now(timezone.utc)
+    polled_at = now_ljubljana()
     readings: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
 
@@ -688,7 +751,7 @@ def live_dashboard() -> None:
             f"""
             <div class="status-card status-ok">
                 <b>● LIVE · All selected systems are online</b><br>
-                Last API poll: {polled_at.strftime("%Y-%m-%d %H:%M:%S UTC")}
+                Last API poll: {polled_at.strftime("%Y-%m-%d %H:%M:%S %Z")}
             </div>
             """,
             unsafe_allow_html=True,
@@ -698,7 +761,7 @@ def live_dashboard() -> None:
             f"""
             <div class="status-card status-warning">
                 <b>● PARTIAL · Some systems could not be read</b><br>
-                Last API poll: {polled_at.strftime("%Y-%m-%d %H:%M:%S UTC")}
+                Last API poll: {polled_at.strftime("%Y-%m-%d %H:%M:%S %Z")}
             </div>
             """,
             unsafe_allow_html=True,
@@ -708,7 +771,7 @@ def live_dashboard() -> None:
             f"""
             <div class="status-card status-error">
                 <b>● OFFLINE / API ERROR · No selected system returned live data</b><br>
-                Last API attempt: {polled_at.strftime("%Y-%m-%d %H:%M:%S UTC")}
+                Last API attempt: {polled_at.strftime("%Y-%m-%d %H:%M:%S %Z")}
             </div>
             """,
             unsafe_allow_html=True,
