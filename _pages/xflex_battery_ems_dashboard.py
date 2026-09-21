@@ -113,6 +113,67 @@ st.markdown(
             border-radius: 999px;
         }
 
+        .battery-wrap {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin: .7rem 0 .9rem 0;
+        }
+
+        .battery-shell {
+            position: relative;
+            width: 170px;
+            height: 78px;
+            border: 4px solid rgba(128,128,128,.78);
+            border-radius: 12px;
+            padding: 5px;
+            box-sizing: border-box;
+            background: rgba(128,128,128,.06);
+        }
+
+        .battery-shell:after {
+            content: "";
+            position: absolute;
+            right: -13px;
+            top: 22px;
+            width: 9px;
+            height: 28px;
+            border-radius: 0 6px 6px 0;
+            background: rgba(128,128,128,.78);
+        }
+
+        .battery-fill {
+            height: 100%;
+            border-radius: 6px;
+            transition: width .35s ease;
+        }
+
+        .battery-percentage {
+            font-size: 2.65rem;
+            font-weight: 820;
+            line-height: 1;
+        }
+
+        .section-note {
+            border: 1px solid rgba(128,128,128,.18);
+            border-radius: 12px;
+            padding: .75rem .9rem;
+            margin: .2rem 0 .9rem 0;
+            background: rgba(128,128,128,.035);
+            font-size: .88rem;
+            color: rgba(128,128,128,.95);
+        }
+
+        .signal-chip {
+            display: inline-block;
+            padding: .18rem .5rem;
+            margin-left: .25rem;
+            border-radius: 999px;
+            border: 1px solid rgba(128,128,128,.22);
+            font-size: .76rem;
+            color: rgba(128,128,128,.95);
+        }
+
         div[data-testid="stMetric"] {
             border: 1px solid rgba(128,128,128,.18);
             border-radius: 12px;
@@ -331,14 +392,48 @@ def soc_percent(raw_value: Any) -> float | None:
     return value if 0 <= value <= 100 else None
 
 
-def wh_15min_to_kw(value: Any) -> float | None:
-    """
-    Convert energy accumulated in the running 15-minute interval to an
-    equivalent average kW over a full 15-minute period:
-        Wh / 1000 kWh * 4 = kW
+def api_timestamp_datetime(value: Any) -> datetime | None:
+    """Parse the documented UTCtimeStamp as a timezone-aware UTC datetime."""
+    if value in (None, "", "?"):
+        return None
 
-    Important: this is NOT an instantaneous power measurement.
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(str(value).strip(), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc)
+
+
+def running_interval_wh_to_kw(value: Any, api_timestamp: Any) -> float | None:
     """
+    Estimate average kW since the start of the current 15-minute interval.
+
+    The API exposes accumulated Wh in the running quarter-hour, not a true
+    instantaneous power signal. This divides accumulated energy by elapsed
+    interval time, giving a live interval-average estimate.
+    """
+    wh = number(value)
+    if wh is None:
+        return None
+
+    dt = api_timestamp_datetime(api_timestamp) or datetime.now(timezone.utc)
+    elapsed_seconds = (dt.minute % 15) * 60 + dt.second + dt.microsecond / 1_000_000
+
+    if elapsed_seconds < 30:
+        return None
+
+    return (wh / 1000.0) / (elapsed_seconds / 3600.0)
+
+
+def completed_15min_wh_to_kw(value: Any) -> float | None:
+    """Convert Wh from a completed 15-minute interval to average kW."""
     wh = number(value)
     if wh is None:
         return None
@@ -384,36 +479,105 @@ def soc_color(soc: float | None) -> str:
     return "#2e7d32"
 
 
-def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, float | None]:
+def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
     """
-    Build useful current 15-minute flow metrics from documented read fields.
+    Exact mapping from the supplied signal table.
 
-    These are equivalent average kW values derived from Wh accumulated in the
-    running 15-minute interval. The API table supplied does not expose a true
-    instantaneous PV/grid power variable.
+    [0] GRID
+      source_energy_*[0]   = imported energy FROM grid
+      consumer_energy_*[0] = exported energy TO grid
+
+    [4] PV 1
+      source_energy_*[4]   = PV 1 produced energy
+      consumer_energy_*[4] = PV 1 consumed energy (normally near zero)
+
+    [5] PV 2
+      source_energy_*[5]   = PV 2 produced energy
+      consumer_energy_*[5] = PV 2 consumed energy (normally near zero)
+
+    [7] HEE / BATTERY
+      source_energy_*[7]   = produced/exported energy = discharging
+      consumer_energy_*[7] = consumed energy = charging
     """
-    flows = {
-        "grid_import_kw": wh_15min_to_kw(data.get("source_energy_15min[0]")),
-        "grid_export_kw": wh_15min_to_kw(data.get("consumer_energy_15min[0]")),
-        "battery_export_kw": wh_15min_to_kw(data.get("source_energy_15min[7]")),
-        "battery_import_kw": wh_15min_to_kw(data.get("consumer_energy_15min[7]")),
-        "pv_1_kw": None,
-        "pv_2_kw": None,
+    ts = data.get("UTCtimeStamp")
+
+    result: dict[str, Any] = {
+        "grid_meter": "M1.1" if plant_id == "SK_Skrlj_1" else "M2.1",
+        "grid_import_kw": running_interval_wh_to_kw(
+            data.get("source_energy_15min[0]"), ts
+        ),
+        "grid_export_kw": running_interval_wh_to_kw(
+            data.get("consumer_energy_15min[0]"), ts
+        ),
+        "grid_import_last_kw": completed_15min_wh_to_kw(
+            data.get("source_energy_15min_last[0]")
+        ),
+        "grid_export_last_kw": completed_15min_wh_to_kw(
+            data.get("consumer_energy_15min_last[0]")
+        ),
+        "battery_discharge_kw": running_interval_wh_to_kw(
+            data.get("source_energy_15min[7]"), ts
+        ),
+        "battery_charge_kw": running_interval_wh_to_kw(
+            data.get("consumer_energy_15min[7]"), ts
+        ),
+        "battery_discharge_last_kw": completed_15min_wh_to_kw(
+            data.get("source_energy_15min_last[7]")
+        ),
+        "battery_charge_last_kw": completed_15min_wh_to_kw(
+            data.get("consumer_energy_15min_last[7]")
+        ),
+        "pv_channels": [],
     }
 
-    # Mapping follows the supplied variable table:
-    # SK_Skrlj_1: [4] is marked debug/ignore; [5] is the meaningful PV channel.
-    # SK_Skrlj_2: [4] = PV 1 (75 kW), [5] = PV 2 (258 kW).
     if plant_id == "SK_Skrlj_1":
-        flows["pv_1_kw"] = wh_15min_to_kw(data.get("source_energy_15min[5]"))
-    elif plant_id == "SK_Skrlj_2":
-        flows["pv_1_kw"] = wh_15min_to_kw(data.get("source_energy_15min[4]"))
-        flows["pv_2_kw"] = wh_15min_to_kw(data.get("source_energy_15min[5]"))
-    else:
-        flows["pv_1_kw"] = wh_15min_to_kw(data.get("source_energy_15min[4]"))
-        flows["pv_2_kw"] = wh_15min_to_kw(data.get("source_energy_15min[5]"))
+        # [4] is explicitly marked "Ignore this field (Debug values)".
+        # [5] is the documented real PV channel: M1.3, PV 3,
+        # SK Škrlj, SolarEdge, 487 kW.
+        result["pv_channels"] = [
+            {
+                "name": "PV · SK Škrlj SolarEdge",
+                "meter": "M1.3",
+                "installed_kw": 487,
+                "signal": "source_energy_15min[5]",
+                "current_kw": running_interval_wh_to_kw(
+                    data.get("source_energy_15min[5]"), ts
+                ),
+                "last_kw": completed_15min_wh_to_kw(
+                    data.get("source_energy_15min_last[5]")
+                ),
+            }
+        ]
 
-    return flows
+    elif plant_id == "SK_Skrlj_2":
+        result["pv_channels"] = [
+            {
+                "name": "PV 1 · Soldin",
+                "meter": "M2.3",
+                "installed_kw": 75,
+                "signal": "source_energy_15min[4]",
+                "current_kw": running_interval_wh_to_kw(
+                    data.get("source_energy_15min[4]"), ts
+                ),
+                "last_kw": completed_15min_wh_to_kw(
+                    data.get("source_energy_15min_last[4]")
+                ),
+            },
+            {
+                "name": "PV 2 · Škrlj",
+                "meter": "M2.4",
+                "installed_kw": 258,
+                "signal": "source_energy_15min[5]",
+                "current_kw": running_interval_wh_to_kw(
+                    data.get("source_energy_15min[5]"), ts
+                ),
+                "last_kw": completed_15min_wh_to_kw(
+                    data.get("source_energy_15min_last[5]")
+                ),
+            },
+        ]
+
+    return result
 
 
 def schedule_dataframe(
@@ -494,24 +658,30 @@ def render_soc_card(
     api_timestamp: str | None,
 ) -> None:
     pct = 0 if soc is None else max(0, min(100, soc))
-    soc_text = "Unavailable" if soc is None else f"{soc:.1f}%"
+    soc_text = "—" if soc is None else f"{soc:.1f}%"
+    fill_color = soc_color(soc)
 
     st.markdown(
         f"""
         <div class="soc-card">
             <div class="card-label">{plant_id} · Battery state of charge</div>
-            <div class="big-value">{soc_text}</div>
-            <div class="soc-bar-bg">
-                <div class="soc-bar-fill"
-                     style="width:{pct:.1f}%; background:{soc_color(soc)};">
+            <div class="battery-wrap">
+                <div class="battery-shell">
+                    <div class="battery-fill"
+                         style="width:{pct:.1f}%; background:{fill_color};">
+                    </div>
+                </div>
+                <div>
+                    <div class="battery-percentage">{soc_text}</div>
+                    <div class="small-note">{operating_mode(setpoint_w)}</div>
                 </div>
             </div>
             <div class="small-note">
-                Capacity: {fmt_capacity(capacity_wh)}
+                Nominal capacity: {fmt_capacity(capacity_wh)}
                 &nbsp;•&nbsp;
-                EMS state: {operating_mode(setpoint_w)}
+                EMS setpoint: {fmt_kw(setpoint_w / 1000 if setpoint_w is not None else None)}
                 &nbsp;•&nbsp;
-                API timestamp (Ljubljana): {format_ljubljana_time(api_timestamp)}
+                API timestamp: {format_ljubljana_time(api_timestamp)}
             </div>
         </div>
         """,
@@ -519,13 +689,34 @@ def render_soc_card(
     )
 
 
-def render_flow_card(label: str, value: float | None, note: str) -> None:
+def render_flow_card(
+    label: str,
+    current_kw: float | None,
+    *,
+    meter: str,
+    signal: str,
+    previous_kw: float | None = None,
+    installed_kw: float | None = None,
+) -> None:
+    capacity_text = (
+        f" · Installed: {installed_kw:.0f} kW"
+        if installed_kw is not None
+        else ""
+    )
+
     st.markdown(
         f"""
         <div class="flow-card">
-            <div class="card-label">{label}</div>
-            <div class="flow-value">{fmt_kw(value)}</div>
-            <div class="small-note">{note}</div>
+            <div class="card-label">
+                {label}
+                <span class="signal-chip">{meter}</span>
+            </div>
+            <div class="flow-value">{fmt_kw(current_kw)}</div>
+            <div class="small-note">
+                Current 15-min interval average so far{capacity_text}<br>
+                Previous full 15 min: {fmt_kw(previous_kw)}<br>
+                Signal: {signal}
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -547,80 +738,141 @@ def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
         api_timestamp=str(api_timestamp) if api_timestamp is not None else None,
     )
 
-    st.markdown("#### Live energy flow")
+    st.markdown("#### Solar generation")
+    pv_channels = flows["pv_channels"]
 
-    if plant_id == "SK_Skrlj_2":
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            render_flow_card(
-                "Solar PV 1",
-                flows["pv_1_kw"],
-                "Running 15-min equivalent average · source_energy_15min[4]",
-            )
-        with c2:
-            render_flow_card(
-                "Solar PV 2",
-                flows["pv_2_kw"],
-                "Running 15-min equivalent average · source_energy_15min[5]",
-            )
-        with c3:
-            render_flow_card(
-                "Grid import",
-                flows["grid_import_kw"],
-                "Energy taken from grid in the running 15-min interval",
-            )
-        with c4:
-            render_flow_card(
-                "Grid export",
-                flows["grid_export_kw"],
-                "Energy delivered to grid in the running 15-min interval",
-            )
-    else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            render_flow_card(
-                "Solar PV",
-                flows["pv_1_kw"],
-                "Mapped PV channel · running 15-min equivalent average",
-            )
-        with c2:
-            render_flow_card(
-                "Grid import",
-                flows["grid_import_kw"],
-                "Energy taken from grid in the running 15-min interval",
-            )
-        with c3:
-            render_flow_card(
-                "Grid export",
-                flows["grid_export_kw"],
-                "Energy delivered to grid in the running 15-min interval",
-            )
+    if pv_channels:
+        pv_cols = st.columns(len(pv_channels))
+        for col, pv in zip(pv_cols, pv_channels):
+            with col:
+                render_flow_card(
+                    pv["name"],
+                    pv["current_kw"],
+                    meter=pv["meter"],
+                    signal=pv["signal"],
+                    previous_kw=pv["last_kw"],
+                    installed_kw=pv["installed_kw"],
+                )
+
+    if plant_id == "SK_Skrlj_1":
+        st.caption(
+            "The supplied mapping explicitly marks channel [4] as debug/ignore "
+            "for SK_Skrlj_1. Its real documented PV production channel is "
+            "source_energy_15min[5] (M1.3, SolarEdge 487 kW)."
+        )
+
+    st.markdown("#### Grid meter")
+    g1, g2 = st.columns(2)
+    with g1:
+        render_flow_card(
+            "Import from grid",
+            flows["grid_import_kw"],
+            meter=flows["grid_meter"],
+            signal="source_energy_15min[0]",
+            previous_kw=flows["grid_import_last_kw"],
+        )
+    with g2:
+        render_flow_card(
+            "Export to grid",
+            flows["grid_export_kw"],
+            meter=flows["grid_meter"],
+            signal="consumer_energy_15min[0]",
+            previous_kw=flows["grid_export_last_kw"],
+        )
+
+    st.markdown(
+        f"""
+        <div class="section-note">
+            <b>Grid signal:</b> {plant_id} is mapped to meter
+            <b>{flows["grid_meter"]}</b>. The provided table shows M1.1 for
+            SK_Skrlj_1 and M2.1 for SK_Skrlj_2. It does not identify a separate
+            single site/PCC total, so these values are shown as documented meter
+            readings and are not summed into a "site grid" value.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Battery / HEE flow")
+    battery_meter = "M1.2" if plant_id == "SK_Skrlj_1" else "M2.2"
 
     b1, b2, b3 = st.columns(3)
     with b1:
-        st.metric(
+        render_flow_card(
             "Battery charging",
-            fmt_kw(flows["battery_import_kw"]),
-            help="Derived from consumer_energy_15min[7].",
+            flows["battery_charge_kw"],
+            meter=battery_meter,
+            signal="consumer_energy_15min[7]",
+            previous_kw=flows["battery_charge_last_kw"],
         )
     with b2:
-        st.metric(
+        render_flow_card(
             "Battery discharging",
-            fmt_kw(flows["battery_export_kw"]),
-            help="Derived from source_energy_15min[7].",
+            flows["battery_discharge_kw"],
+            meter=battery_meter,
+            signal="source_energy_15min[7]",
+            previous_kw=flows["battery_discharge_last_kw"],
         )
     with b3:
         st.metric(
-            "EMS setpoint",
+            "Actual EMS setpoint",
             fmt_kw(setpoint_w / 1000 if setpoint_w is not None else None),
-            help="Actual plant_setpoint_used. Positive = charging/import; negative = discharging/export.",
+            help=(
+                "plant_setpoint_used [W]. Negative = export/discharging; "
+                "positive = import/charging."
+            ),
+        )
+        st.caption(
+            "Controller setpoint, not a measured instantaneous battery-power signal."
         )
 
-    st.caption(
-        "PV and grid kW values above are calculated from energy accumulated in the "
-        "current 15-minute interval. They are not true instantaneous power values, "
-        "because the supplied API variable list does not expose instantaneous PV/grid kW."
+    st.markdown(
+        """
+        <div class="section-note">
+            <b>About the kW values:</b> the API table provides accumulated Wh in
+            the running 15-minute interval, not true instantaneous PV/grid power.
+            The dashboard therefore calculates average kW <b>so far in the current
+            quarter-hour</b>. It also shows the completed previous 15-minute average,
+            which is the most stable comparable power value available from these fields.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+
+    with st.expander("Exact API signal mapping used"):
+        if plant_id == "SK_Skrlj_1":
+            rows = [
+                ["Grid import", "M1.1", "source_energy_15min[0]", "Imported energy from grid"],
+                ["Grid export", "M1.1", "consumer_energy_15min[0]", "Exported energy to grid"],
+                ["PV production", "M1.3", "source_energy_15min[5]", "PV 3 / SK Škrlj / SolarEdge 487 kW"],
+                ["Battery discharge", "M1.2", "source_energy_15min[7]", "HEE 1 produced/exported energy"],
+                ["Battery charge", "M1.2", "consumer_energy_15min[7]", "HEE 1 consumed energy"],
+                ["SOC", "HEE 1", "battery_soc[7]", "Battery SOC in 0.1% units"],
+            ]
+        else:
+            rows = [
+                ["Grid import", "M2.1", "source_energy_15min[0]", "Imported energy from grid"],
+                ["Grid export", "M2.1", "consumer_energy_15min[0]", "Exported energy to grid"],
+                ["PV 1 production", "M2.3", "source_energy_15min[4]", "Soldin 75 kW"],
+                ["PV 2 production", "M2.4", "source_energy_15min[5]", "Škrlj 258 kW"],
+                ["Battery discharge", "M2.2", "source_energy_15min[7]", "HEE 2 produced/exported energy"],
+                ["Battery charge", "M2.2", "consumer_energy_15min[7]", "HEE 2 consumed energy"],
+                ["SOC", "HEE 2", "battery_soc[7]", "Battery SOC in 0.1% units"],
+            ]
+
+        st.dataframe(
+            pd.DataFrame(
+                rows,
+                columns=[
+                    "Dashboard value",
+                    "Meter / device",
+                    "API signal",
+                    "Meaning in documentation",
+                ],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def render_schedule(plant_id: str) -> None:
@@ -767,7 +1019,7 @@ st.markdown(
 )
 st.markdown(
     '<div class="dashboard-subtitle">'
-    'Live battery SOC, PV/grid energy flow and uploaded battery schedules · Europe/Ljubljana time'
+    'Live battery SOC, documented PV/grid channels and EMS schedules · Europe/Ljubljana time'
     '</div>',
     unsafe_allow_html=True,
 )
