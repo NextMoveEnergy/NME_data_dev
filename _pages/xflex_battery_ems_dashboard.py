@@ -502,7 +502,7 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, Any]:
     ts = data.get("UTCtimeStamp")
 
     result: dict[str, Any] = {
-        "grid_meter": "M1.1" if plant_id == "SK_Skrlj_1" else "M2.1",
+        "grid_meter": "Shared site grid",
         "grid_import_kw": running_interval_wh_to_kw(
             data.get("source_energy_15min[0]"), ts
         ),
@@ -723,6 +723,102 @@ def render_flow_card(
     )
 
 
+def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
+    """
+    Render one shared external grid/PCC block.
+
+    The user confirmed that [0] represents the same external grid connection for
+    both plants. We therefore show it only once, using the first available plant
+    response. If both are available, we also compare the raw values and warn if
+    they unexpectedly diverge.
+    """
+    preferred_order = ["SK_Skrlj_1", "SK_Skrlj_2"]
+    source_plant = next((p for p in preferred_order if p in readings), None)
+
+    if source_plant is None:
+        st.error("Site grid data is unavailable because no live plant response was received.")
+        return
+
+    data = readings[source_plant]
+    ts = data.get("UTCtimeStamp")
+
+    grid_import_kw = running_interval_wh_to_kw(
+        data.get("source_energy_15min[0]"), ts
+    )
+    grid_export_kw = running_interval_wh_to_kw(
+        data.get("consumer_energy_15min[0]"), ts
+    )
+    grid_import_last_kw = completed_15min_wh_to_kw(
+        data.get("source_energy_15min_last[0]")
+    )
+    grid_export_last_kw = completed_15min_wh_to_kw(
+        data.get("consumer_energy_15min_last[0]")
+    )
+
+    st.subheader("Site grid")
+    st.caption(
+        "Single external grid connection for the whole site. "
+        "Read from channel [0]; not summed across SK1 and SK2."
+    )
+
+    g1, g2 = st.columns(2)
+    with g1:
+        render_flow_card(
+            "Import from grid",
+            grid_import_kw,
+            meter="Site grid",
+            signal="source_energy_15min[0]",
+            previous_kw=grid_import_last_kw,
+        )
+    with g2:
+        render_flow_card(
+            "Export to grid",
+            grid_export_kw,
+            meter="Site grid",
+            signal="consumer_energy_15min[0]",
+            previous_kw=grid_export_last_kw,
+        )
+
+    st.markdown(
+        """
+        <div class="section-note">
+            <b>Grid interpretation:</b>
+            <code>source_energy_*[0]</code> = energy imported from the external grid,
+            while <code>consumer_energy_*[0]</code> = energy exported to the external grid.
+            SK1 and SK2 are internal subsystems below the same connection, so this dashboard
+            intentionally displays the grid only once.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Sanity check: if both plant responses are available, the shared grid channel
+    # should agree. Compare running-interval raw Wh values.
+    if "SK_Skrlj_1" in readings and "SK_Skrlj_2" in readings:
+        a = readings["SK_Skrlj_1"]
+        b = readings["SK_Skrlj_2"]
+
+        pairs = [
+            ("import", number(a.get("source_energy_15min[0]")), number(b.get("source_energy_15min[0]"))),
+            ("export", number(a.get("consumer_energy_15min[0]")), number(b.get("consumer_energy_15min[0]"))),
+        ]
+
+        mismatches = []
+        for label, v1, v2 in pairs:
+            if v1 is None or v2 is None:
+                continue
+            tolerance = max(1.0, 0.01 * max(abs(v1), abs(v2), 1.0))
+            if abs(v1 - v2) > tolerance:
+                mismatches.append(f"{label}: SK1={v1:.0f} Wh, SK2={v2:.0f} Wh")
+
+        if mismatches:
+            st.warning(
+                "The two plant responses returned different values for the shared "
+                "grid channel [0]. Showing the SK1 value. Check API mapping if this persists. "
+                + " | ".join(mismatches)
+            )
+
+
 def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
     soc = soc_percent(data.get("battery_soc[7]"))
     capacity = number(data.get("battery_capacity[7]"))
@@ -760,38 +856,6 @@ def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
             "for SK_Skrlj_1. Its real documented PV production channel is "
             "source_energy_15min[5] (M1.3, SolarEdge 487 kW)."
         )
-
-    st.markdown("#### Grid meter")
-    g1, g2 = st.columns(2)
-    with g1:
-        render_flow_card(
-            "Import from grid",
-            flows["grid_import_kw"],
-            meter=flows["grid_meter"],
-            signal="source_energy_15min[0]",
-            previous_kw=flows["grid_import_last_kw"],
-        )
-    with g2:
-        render_flow_card(
-            "Export to grid",
-            flows["grid_export_kw"],
-            meter=flows["grid_meter"],
-            signal="consumer_energy_15min[0]",
-            previous_kw=flows["grid_export_last_kw"],
-        )
-
-    st.markdown(
-        f"""
-        <div class="section-note">
-            <b>Grid signal:</b> {plant_id} is mapped to meter
-            <b>{flows["grid_meter"]}</b>. The provided table shows M1.1 for
-            SK_Skrlj_1 and M2.1 for SK_Skrlj_2. It does not identify a separate
-            single site/PCC total, so these values are shown as documented meter
-            readings and are not summed into a "site grid" value.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     st.markdown("#### Battery / HEE flow")
     battery_meter = "M1.2" if plant_id == "SK_Skrlj_1" else "M2.2"
@@ -842,8 +906,8 @@ def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
     with st.expander("Exact API signal mapping used"):
         if plant_id == "SK_Skrlj_1":
             rows = [
-                ["Grid import", "M1.1", "source_energy_15min[0]", "Imported energy from grid"],
-                ["Grid export", "M1.1", "consumer_energy_15min[0]", "Exported energy to grid"],
+                ["Site grid import", "Shared grid [0]", "source_energy_15min[0]", "Imported energy from grid"],
+                ["Site grid export", "Shared grid [0]", "consumer_energy_15min[0]", "Exported energy to grid"],
                 ["PV production", "M1.3", "source_energy_15min[5]", "PV 3 / SK Škrlj / SolarEdge 487 kW"],
                 ["Battery discharge", "M1.2", "source_energy_15min[7]", "HEE 1 produced/exported energy"],
                 ["Battery charge", "M1.2", "consumer_energy_15min[7]", "HEE 1 consumed energy"],
@@ -851,8 +915,8 @@ def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
             ]
         else:
             rows = [
-                ["Grid import", "M2.1", "source_energy_15min[0]", "Imported energy from grid"],
-                ["Grid export", "M2.1", "consumer_energy_15min[0]", "Exported energy to grid"],
+                ["Site grid import", "Shared grid [0]", "source_energy_15min[0]", "Imported energy from grid"],
+                ["Site grid export", "Shared grid [0]", "consumer_energy_15min[0]", "Exported energy to grid"],
                 ["PV 1 production", "M2.3", "source_energy_15min[4]", "Soldin 75 kW"],
                 ["PV 2 production", "M2.4", "source_energy_15min[5]", "Škrlj 258 kW"],
                 ["Battery discharge", "M2.2", "source_energy_15min[7]", "HEE 2 produced/exported energy"],
@@ -1083,6 +1147,10 @@ def live_dashboard() -> None:
             """,
             unsafe_allow_html=True,
         )
+
+    if readings:
+        render_site_grid(readings)
+        st.divider()
 
     for plant_id in selected_plants:
         st.subheader(plant_id)
