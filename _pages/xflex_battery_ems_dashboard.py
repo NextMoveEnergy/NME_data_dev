@@ -725,98 +725,163 @@ def render_flow_card(
 
 def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
     """
-    Render one shared external grid/PCC block.
+    Render the two documented grid meters separately and, when both are
+    available, also show their combined import/export.
 
-    The user confirmed that [0] represents the same external grid connection for
-    both plants. We therefore show it only once, using the first available plant
-    response. If both are available, we also compare the raw values and warn if
-    they unexpectedly diverge.
+    Combined site values are calculated as:
+        total import = SK1 import + SK2 import
+        total export = SK1 export + SK2 export
+
+    No netting is applied so that import and export remain transparent.
     """
-    preferred_order = ["SK_Skrlj_1", "SK_Skrlj_2"]
-    source_plant = next((p for p in preferred_order if p in readings), None)
 
-    if source_plant is None:
-        st.error("Site grid data is unavailable because no live plant response was received.")
-        return
-
-    data = readings[source_plant]
-    ts = data.get("UTCtimeStamp")
-
-    grid_import_kw = running_interval_wh_to_kw(
-        data.get("source_energy_15min[0]"), ts
-    )
-    grid_export_kw = running_interval_wh_to_kw(
-        data.get("consumer_energy_15min[0]"), ts
-    )
-    grid_import_last_kw = completed_15min_wh_to_kw(
-        data.get("source_energy_15min_last[0]")
-    )
-    grid_export_last_kw = completed_15min_wh_to_kw(
-        data.get("consumer_energy_15min_last[0]")
-    )
-
-    st.subheader("Site grid")
+    st.subheader("Grid overview")
     st.caption(
-        "Single external grid connection for the whole site. "
-        "Read from channel [0]; not summed across SK1 and SK2."
+        "Grid meters are shown separately for SK1 and SK2, with an additional "
+        "combined total calculated as the sum of both meters."
     )
 
-    g1, g2 = st.columns(2)
-    with g1:
-        render_flow_card(
-            "Import from grid",
-            grid_import_kw,
-            meter="Site grid",
-            signal="source_energy_15min[0]",
-            previous_kw=grid_import_last_kw,
-        )
-    with g2:
-        render_flow_card(
-            "Export to grid",
-            grid_export_kw,
-            meter="Site grid",
-            signal="consumer_energy_15min[0]",
-            previous_kw=grid_export_last_kw,
-        )
+    grid_values: dict[str, dict[str, Any]] = {}
 
-    st.markdown(
-        """
-        <div class="section-note">
-            <b>Grid interpretation:</b>
-            <code>source_energy_*[0]</code> = energy imported from the external grid,
-            while <code>consumer_energy_*[0]</code> = energy exported to the external grid.
-            SK1 and SK2 are internal subsystems below the same connection, so this dashboard
-            intentionally displays the grid only once.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    for plant_id, meter_name in (
+        ("SK_Skrlj_1", "M1.1"),
+        ("SK_Skrlj_2", "M2.1"),
+    ):
+        if plant_id not in readings:
+            continue
 
-    # Sanity check: if both plant responses are available, the shared grid channel
-    # should agree. Compare running-interval raw Wh values.
-    if "SK_Skrlj_1" in readings and "SK_Skrlj_2" in readings:
-        a = readings["SK_Skrlj_1"]
-        b = readings["SK_Skrlj_2"]
+        data = readings[plant_id]
+        ts = data.get("UTCtimeStamp")
 
-        pairs = [
-            ("import", number(a.get("source_energy_15min[0]")), number(b.get("source_energy_15min[0]"))),
-            ("export", number(a.get("consumer_energy_15min[0]")), number(b.get("consumer_energy_15min[0]"))),
-        ]
+        grid_values[plant_id] = {
+            "meter": meter_name,
+            "import_kw": running_interval_wh_to_kw(
+                data.get("source_energy_15min[0]"), ts
+            ),
+            "export_kw": running_interval_wh_to_kw(
+                data.get("consumer_energy_15min[0]"), ts
+            ),
+            "import_last_kw": completed_15min_wh_to_kw(
+                data.get("source_energy_15min_last[0]")
+            ),
+            "export_last_kw": completed_15min_wh_to_kw(
+                data.get("consumer_energy_15min_last[0]")
+            ),
+        }
 
-        mismatches = []
-        for label, v1, v2 in pairs:
-            if v1 is None or v2 is None:
+    # Individual grid meters
+    meter_cols = st.columns(2)
+
+    for col, plant_id, title in zip(
+        meter_cols,
+        ("SK_Skrlj_1", "SK_Skrlj_2"),
+        ("SK1 grid", "SK2 grid"),
+    ):
+        with col:
+            values = grid_values.get(plant_id)
+
+            if not values:
+                st.error(f"{title}: data unavailable")
                 continue
-            tolerance = max(1.0, 0.01 * max(abs(v1), abs(v2), 1.0))
-            if abs(v1 - v2) > tolerance:
-                mismatches.append(f"{label}: SK1={v1:.0f} Wh, SK2={v2:.0f} Wh")
 
-        if mismatches:
-            st.warning(
-                "The two plant responses returned different values for the shared "
-                "grid channel [0]. Showing the SK1 value. Check API mapping if this persists. "
-                + " | ".join(mismatches)
+            st.markdown(f"#### {title} · {values['meter']}")
+
+            render_flow_card(
+                "Import from grid",
+                values["import_kw"],
+                meter=values["meter"],
+                signal="source_energy_15min[0]",
+                previous_kw=values["import_last_kw"],
             )
+
+            render_flow_card(
+                "Export to grid",
+                values["export_kw"],
+                meter=values["meter"],
+                signal="consumer_energy_15min[0]",
+                previous_kw=values["export_last_kw"],
+            )
+
+    # Combined total only when both meters are available.
+    sk1 = grid_values.get("SK_Skrlj_1")
+    sk2 = grid_values.get("SK_Skrlj_2")
+
+    st.markdown("#### Combined grid total")
+
+    if sk1 and sk2:
+        def add_optional(a: float | None, b: float | None) -> float | None:
+            if a is None or b is None:
+                return None
+            return a + b
+
+        total_import = add_optional(sk1["import_kw"], sk2["import_kw"])
+        total_export = add_optional(sk1["export_kw"], sk2["export_kw"])
+        total_import_last = add_optional(
+            sk1["import_last_kw"], sk2["import_last_kw"]
+        )
+        total_export_last = add_optional(
+            sk1["export_last_kw"], sk2["export_last_kw"]
+        )
+
+        total_cols = st.columns(3)
+
+        with total_cols[0]:
+            render_flow_card(
+                "Total grid import",
+                total_import,
+                meter="M1.1 + M2.1",
+                signal="Σ source_energy_15min[0]",
+                previous_kw=total_import_last,
+            )
+
+        with total_cols[1]:
+            render_flow_card(
+                "Total grid export",
+                total_export,
+                meter="M1.1 + M2.1",
+                signal="Σ consumer_energy_15min[0]",
+                previous_kw=total_export_last,
+            )
+
+        with total_cols[2]:
+            if total_import is not None and total_export is not None:
+                net_kw = total_import - total_export
+                if net_kw > 0.05:
+                    net_label = "Net import"
+                    net_value = net_kw
+                elif net_kw < -0.05:
+                    net_label = "Net export"
+                    net_value = abs(net_kw)
+                else:
+                    net_label = "Net grid flow"
+                    net_value = 0.0
+
+                st.metric(net_label, fmt_kw(net_value))
+                st.caption(
+                    "Calculated as total import − total export. "
+                    "This is a derived dashboard value."
+                )
+            else:
+                st.metric("Net grid flow", "—")
+                st.caption("Not enough data to calculate the combined net flow.")
+
+        st.markdown(
+            """
+            <div class="section-note">
+                <b>Combined grid:</b> Total import is calculated as
+                <b>SK1 import + SK2 import</b>, and total export as
+                <b>SK1 export + SK2 export</b>. The dashboard also shows the
+                derived net result separately. Individual import/export values
+                remain visible so no information is hidden by netting.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    else:
+        st.warning(
+            "Combined grid total requires valid live data from both SK1 and SK2."
+        )
 
 
 def render_plant_live(plant_id: str, data: dict[str, Any]) -> None:
@@ -1083,7 +1148,7 @@ st.markdown(
 )
 st.markdown(
     '<div class="dashboard-subtitle">'
-    'Live battery SOC, documented PV/grid channels and EMS schedules · Europe/Ljubljana time'
+    'Live battery SOC, PV production, individual & combined grid flow and EMS schedules · Europe/Ljubljana time'
     '</div>',
     unsafe_allow_html=True,
 )
