@@ -416,22 +416,53 @@ def current_flows(data: dict[str, Any], plant_id: str) -> dict[str, float | None
     return flows
 
 
-def schedule_dataframe(data: dict[str, Any], prefix: str) -> pd.DataFrame:
+def schedule_dataframe(
+    data: dict[str, Any],
+    prefix: str,
+    *,
+    today_utc_to_ljubljana: bool = False,
+) -> pd.DataFrame:
+    """
+    Build a 96-slot schedule table.
+
+    Observed API behaviour:
+    - energy_tt_today is returned on a UTC-indexed 15-minute timeline.
+    - energy_tt_tomorrow already matches the uploaded/local schedule.
+
+    Therefore ONLY today's schedule is remapped from UTC slots to
+    Europe/Ljubljana slots. This fixes the observed 2-hour summer-time shift
+    without altering tomorrow's schedule.
+
+    Example during CEST (UTC+2):
+        local 12:00 -> raw UTC slot 10:00
+    """
     rows = []
 
-    for i in range(96):
-        raw = data.get(f"{prefix}[{i}]")
+    local_now = now_ljubljana()
+    utc_offset_minutes = int(
+        (local_now.utcoffset().total_seconds() if local_now.utcoffset() else 0) / 60
+    )
+    offset_slots = utc_offset_minutes // 15
+
+    for local_index in range(96):
+        if today_utc_to_ljubljana:
+            raw_index = (local_index - offset_slots) % 96
+        else:
+            raw_index = local_index
+
+        raw = data.get(f"{prefix}[{raw_index}]")
         kwh = number(raw)
 
-        hour = (i * 15) // 60
-        minute = (i * 15) % 60
-        end_total_minutes = ((i + 1) * 15) % (24 * 60)
+        hour = (local_index * 15) // 60
+        minute = (local_index * 15) % 60
+        end_total_minutes = ((local_index + 1) * 15) % (24 * 60)
         end_hour = end_total_minutes // 60
         end_minute = end_total_minutes % 60
 
         rows.append(
             {
-                "Index": i,
+                "Index": local_index,
+                "Raw API index": raw_index,
                 "Interval": f"{hour:02d}:{minute:02d}–{end_hour:02d}:{end_minute:02d}",
                 "Start": f"{hour:02d}:{minute:02d}",
                 "Energy (kWh/15 min)": kwh,
@@ -609,7 +640,11 @@ def render_schedule(plant_id: str) -> None:
 
         try:
             schedule_data = fetch_schedule_data(plant_id, rt_type)
-            df = schedule_dataframe(schedule_data, prefix)
+            df = schedule_dataframe(
+                schedule_data,
+                prefix,
+                today_utc_to_ljubljana=(day_choice == "Today"),
+            )
         except Exception as exc:
             st.error(f"Could not retrieve {day_choice.lower()} schedule: {exc}")
             return
@@ -646,6 +681,18 @@ def render_schedule(plant_id: str) -> None:
                 f"Scheduled action: {current_action} · "
                 f"Scheduled average power: {fmt_kw(current_power)}"
             )
+
+            with st.expander("Time mapping details", expanded=False):
+                offset_hours = (
+                    local_now.utcoffset().total_seconds() / 3600
+                    if local_now.utcoffset()
+                    else 0
+                )
+                st.write(
+                    f"Today mapping: Europe/Ljubljana = UTC{offset_hours:+.0f}. "
+                    f"Local slot {int(current_row['Index'])} reads raw API slot "
+                    f"{int(current_row['Raw API index'])}."
+                )
 
         chart_df = df.dropna(subset=["Average power (kW)"]).copy()
 
@@ -695,11 +742,19 @@ def render_schedule(plant_id: str) -> None:
             height=400,
         )
 
-        st.caption(
-            "Schedule intervals are shown in Europe/Ljubljana local time. "
-            "Sign convention from the API documentation: negative = battery "
-            "discharging/export, positive = charging/import."
-        )
+        if day_choice == "Today":
+            st.caption(
+                "Today's API schedule is remapped from UTC-indexed 15-minute slots "
+                "to Europe/Ljubljana local time. Tomorrow is left unchanged because "
+                "the API already returns it aligned with the uploaded local schedule. "
+                "Sign convention: negative = discharging/export, positive = charging/import."
+            )
+        else:
+            st.caption(
+                "Tomorrow's schedule is shown exactly as returned by the API because "
+                "it already matches the uploaded Europe/Ljubljana schedule. "
+                "Sign convention: negative = discharging/export, positive = charging/import."
+            )
 
 
 # ---------------------------------------------------------------------
