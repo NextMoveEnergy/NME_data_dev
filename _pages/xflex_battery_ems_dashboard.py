@@ -369,6 +369,80 @@ def fetch_schedule_data(plant_id: str, rt_data_type: str) -> dict[str, Any]:
     return fetch_data(plant_id, rt_data_type)
 
 
+def write_schedule_changes(
+    plant_id: str,
+    changes: dict[str, int],
+) -> dict[str, Any]:
+    """
+    Write selected schedule variables and immediately read them back.
+
+    The xFLEX API documentation supports RTdataType="write/read" with WRdata.
+    Only changed intervals are sent.
+    """
+    if not changes:
+        raise ValueError("No schedule changes were provided.")
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {get_api_key()}",
+    }
+
+    body = {
+        "plantID": plant_id,
+        "RTdataType": "write/read",
+        "WRdata": [changes],
+    }
+
+    try:
+        response = requests.post(
+            API_URL,
+            headers=headers,
+            json=body,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.Timeout as exc:
+        raise RuntimeError(
+            f"Schedule update timed out after {REQUEST_TIMEOUT_SECONDS} seconds."
+        ) from exc
+    except requests.ConnectionError as exc:
+        raise RuntimeError(
+            "Could not connect to the xFLEX API while updating the schedule."
+        ) from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Schedule update request failed: {exc}") from exc
+
+    if response.status_code not in (200, 202):
+        raise RuntimeError(parse_api_error(response))
+
+    try:
+        payload = response.json()
+    except (ValueError, requests.exceptions.JSONDecodeError) as exc:
+        preview = (response.text or "<empty response>").strip()[:1000]
+        raise RuntimeError(
+            "The schedule update returned a non-JSON response. "
+            f"Response: {preview}"
+        ) from exc
+
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    if errors:
+        raise RuntimeError(
+            "The API reported schedule update errors: "
+            + json.dumps(errors, ensure_ascii=False)
+        )
+
+    return payload
+
+
+def schedule_editor_version_key(plant_id: str, day_choice: str) -> str:
+    return f"schedule_editor_version_{plant_id}_{day_choice.lower()}"
+
+
+def bump_schedule_editor_version(plant_id: str, day_choice: str) -> None:
+    key = schedule_editor_version_key(plant_id, day_choice)
+    st.session_state[key] = int(st.session_state.get(key, 0)) + 1
+
+
 # ---------------------------------------------------------------------
 # Data conversion helpers
 # ---------------------------------------------------------------------
@@ -1130,6 +1204,14 @@ def render_schedule(plant_id: str) -> None:
         )
         prefix = rt_type
 
+        flash_key = f"schedule_flash_{plant_id}_{day_choice.lower()}"
+        flash = st.session_state.pop(flash_key, None)
+        if flash:
+            if flash.get("type") == "success":
+                st.success(flash.get("message", "Schedule updated successfully."))
+            elif flash.get("type") == "error":
+                st.error(flash.get("message", "Schedule update failed."))
+
         try:
             schedule_data = fetch_schedule_data(plant_id, rt_type)
             df = schedule_dataframe(
@@ -1158,11 +1240,11 @@ def render_schedule(plant_id: str) -> None:
         m2.metric("Scheduled discharge", fmt_kwh(discharge_kwh))
         m3.metric("Intervals received", f"{valid}/96")
 
+        local_now = now_ljubljana()
+        slot_index = current_schedule_index(local_now)
+
         if day_choice == "Today":
-            local_now = now_ljubljana()
-            slot_index = current_schedule_index(local_now)
             current_row = df.loc[df["Index"] == slot_index].iloc[0]
-            current_energy = current_row["Energy (kWh/15 min)"]
             current_action = current_row["Action"]
             current_power = current_row["Average power (kW)"]
 
@@ -1182,7 +1264,7 @@ def render_schedule(plant_id: str) -> None:
                 )
                 st.write(
                     f"Today mapping: Europe/Ljubljana = UTC{offset_hours:+.0f}. "
-                    f"Local slot {int(current_row['Index'])} reads raw API slot "
+                    f"Local slot {int(current_row['Index'])} reads/writes raw API slot "
                     f"{int(current_row['Raw API index'])}."
                 )
 
@@ -1222,30 +1304,337 @@ def render_schedule(plant_id: str) -> None:
 
         st.altair_chart(chart, use_container_width=True)
 
-        st.dataframe(
-            df[[
+        st.markdown("#### Schedule editor")
+
+        if day_choice == "Today":
+            editable_df = df.loc[df["Index"] >= slot_index].copy()
+            st.caption(
+                "Intraday editing: only the current and future Ljubljana intervals "
+                "are editable. Past intervals are intentionally locked."
+            )
+        else:
+            editable_df = df.copy()
+            st.caption(
+                "Day-ahead editing: all 96 intervals for tomorrow are editable."
+            )
+
+        # Keep only the fields useful to the operator. Raw API index is retained
+        # internally so local Today intervals are written to the correct UTC slot.
+        editor_df = editable_df[
+            [
+                "Index",
+                "Raw API index",
                 "Interval",
                 "Energy (kWh/15 min)",
                 "Average power (kW)",
                 "Action",
-            ]],
+            ]
+        ].copy()
+
+        # API documentation states that write values are integer-only.
+        # Keep original values for reliable diffing.
+        original_by_local_index = {
+            int(row["Index"]): row["Energy (kWh/15 min)"]
+            for _, row in editor_df.iterrows()
+        }
+        raw_index_by_local_index = {
+            int(row["Index"]): int(row["Raw API index"])
+            for _, row in editor_df.iterrows()
+        }
+
+        version_key = schedule_editor_version_key(plant_id, day_choice)
+        version = int(st.session_state.get(version_key, 0))
+        editor_key = (
+            f"schedule_editor_{plant_id}_{day_choice.lower()}_{version}"
+        )
+
+        edited = st.data_editor(
+            editor_df[
+                [
+                    "Interval",
+                    "Energy (kWh/15 min)",
+                    "Average power (kW)",
+                    "Action",
+                    "Index",
+                    "Raw API index",
+                ]
+            ],
+            key=editor_key,
             use_container_width=True,
             hide_index=True,
-            height=400,
+            height=430,
+            disabled=[
+                "Interval",
+                "Average power (kW)",
+                "Action",
+                "Index",
+                "Raw API index",
+            ],
+            column_config={
+                "Interval": st.column_config.TextColumn(
+                    "Interval",
+                    width="medium",
+                ),
+                "Energy (kWh/15 min)": st.column_config.NumberColumn(
+                    "Energy (kWh/15 min)",
+                    help=(
+                        "Editable schedule value. Positive = charging, "
+                        "negative = discharging. xFLEX writes integer values only."
+                    ),
+                    step=1,
+                    format="%.0f",
+                ),
+                "Average power (kW)": st.column_config.NumberColumn(
+                    "Equivalent power (kW)",
+                    disabled=True,
+                    format="%.1f",
+                ),
+                "Action": st.column_config.TextColumn(
+                    "Current action",
+                    disabled=True,
+                ),
+                "Index": None,
+                "Raw API index": None,
+            },
         )
+
+        changes = []
+        validation_errors = []
+
+        for row_pos, row in edited.iterrows():
+            local_index = int(row["Index"])
+            new_value_raw = row["Energy (kWh/15 min)"]
+            original_value = original_by_local_index.get(local_index)
+
+            if pd.isna(new_value_raw):
+                validation_errors.append(
+                    f"{row['Interval']}: energy value cannot be empty."
+                )
+                continue
+
+            try:
+                new_value_float = float(new_value_raw)
+            except (TypeError, ValueError):
+                validation_errors.append(
+                    f"{row['Interval']}: invalid energy value."
+                )
+                continue
+
+            if abs(new_value_float - round(new_value_float)) > 1e-9:
+                validation_errors.append(
+                    f"{row['Interval']}: xFLEX accepts integer kWh values only."
+                )
+                continue
+
+            new_value = int(round(new_value_float))
+
+            original_float = (
+                None
+                if original_value is None or pd.isna(original_value)
+                else float(original_value)
+            )
+
+            if original_float is None or new_value != int(round(original_float)):
+                raw_index = raw_index_by_local_index[local_index]
+
+                # Safety guard: Today must never modify a past local interval.
+                if day_choice == "Today" and local_index < slot_index:
+                    validation_errors.append(
+                        f"{row['Interval']}: past intervals cannot be modified."
+                    )
+                    continue
+
+                changes.append(
+                    {
+                        "local_index": local_index,
+                        "raw_index": raw_index,
+                        "interval": row["Interval"],
+                        "old": original_float,
+                        "new": new_value,
+                        "api_key": f"{prefix}[{raw_index}]",
+                    }
+                )
+
+        if validation_errors:
+            for error in validation_errors:
+                st.error(error)
+
+        if changes:
+            st.markdown("##### Pending changes")
+
+            diff_df = pd.DataFrame(
+                [
+                    {
+                        "Interval": c["interval"],
+                        "Current": (
+                            None if c["old"] is None else int(round(c["old"]))
+                        ),
+                        "New": c["new"],
+                        "Change": (
+                            None
+                            if c["old"] is None
+                            else c["new"] - int(round(c["old"]))
+                        ),
+                        "API variable": c["api_key"],
+                    }
+                    for c in changes
+                ]
+            )
+
+            st.dataframe(
+                diff_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if day_choice == "Today":
+                st.warning(
+                    "You are about to modify today's live intraday battery schedule. "
+                    "Only the changed current/future intervals will be sent."
+                )
+            else:
+                st.info(
+                    "Only the changed tomorrow intervals will be sent to the EMS."
+                )
+
+            cancel_col, send_col = st.columns([1, 2])
+
+            with cancel_col:
+                if st.button(
+                    "Cancel changes",
+                    key=f"cancel_schedule_{plant_id}_{day_choice}_{version}",
+                    use_container_width=True,
+                ):
+                    bump_schedule_editor_version(plant_id, day_choice)
+                    st.rerun()
+
+            with send_col:
+                send_disabled = bool(validation_errors)
+
+                if st.button(
+                    f"Send / modify {day_choice.lower()} schedule",
+                    key=f"send_schedule_{plant_id}_{day_choice}_{version}",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=send_disabled,
+                ):
+                    wr_values = {
+                        c["api_key"]: int(c["new"])
+                        for c in changes
+                    }
+
+                    try:
+                        with st.spinner(
+                            f"Writing {len(wr_values)} changed interval"
+                            f"{'s' if len(wr_values) != 1 else ''} and verifying..."
+                        ):
+                            write_schedule_changes(
+                                plant_id=plant_id,
+                                changes=wr_values,
+                            )
+
+                            # Force a fresh schedule read after writing.
+                            fetch_schedule_data.clear()
+
+                            verified_data = fetch_schedule_data(
+                                plant_id,
+                                rt_type,
+                            )
+                            verified_df = schedule_dataframe(
+                                verified_data,
+                                prefix,
+                                today_utc_to_ljubljana=(day_choice == "Today"),
+                            )
+
+                            mismatches = []
+
+                            for change in changes:
+                                verified_rows = verified_df.loc[
+                                    verified_df["Index"] == change["local_index"]
+                                ]
+
+                                if verified_rows.empty:
+                                    mismatches.append(
+                                        f"{change['interval']}: interval missing on read-back"
+                                    )
+                                    continue
+
+                                verified_value = verified_rows.iloc[0][
+                                    "Energy (kWh/15 min)"
+                                ]
+
+                                if (
+                                    verified_value is None
+                                    or pd.isna(verified_value)
+                                    or int(round(float(verified_value))) != change["new"]
+                                ):
+                                    mismatches.append(
+                                        f"{change['interval']}: expected "
+                                        f"{change['new']} kWh, read back "
+                                        f"{verified_value!r}"
+                                    )
+
+                            if mismatches:
+                                st.session_state[flash_key] = {
+                                    "type": "error",
+                                    "message": (
+                                        "The API accepted the write, but read-back "
+                                        "verification did not match for: "
+                                        + " | ".join(mismatches)
+                                    ),
+                                }
+                            else:
+                                st.session_state[flash_key] = {
+                                    "type": "success",
+                                    "message": (
+                                        f"{day_choice} schedule updated and verified "
+                                        f"for {plant_id}. "
+                                        f"{len(changes)} interval"
+                                        f"{'s' if len(changes) != 1 else ''} changed."
+                                    ),
+                                }
+
+                            bump_schedule_editor_version(
+                                plant_id,
+                                day_choice,
+                            )
+                            st.rerun()
+
+                    except Exception as exc:
+                        st.error(f"Schedule update failed: {exc}")
+
+        else:
+            st.caption(
+                "Edit one or more energy values above. "
+                "Send/Cancel controls will appear when a change is detected."
+            )
+
+        with st.expander("Full read-only schedule"):
+            st.dataframe(
+                df[
+                    [
+                        "Interval",
+                        "Energy (kWh/15 min)",
+                        "Average power (kW)",
+                        "Action",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+                height=400,
+            )
 
         if day_choice == "Today":
             st.caption(
                 "Today's API schedule is remapped from UTC-indexed 15-minute slots "
-                "to Europe/Ljubljana local time. Tomorrow is left unchanged because "
-                "the API already returns it aligned with the uploaded local schedule. "
-                "Sign convention: negative = discharging/export, positive = charging/import."
+                "to Europe/Ljubljana local time for both reading and writing. "
+                "Negative = discharging/export; positive = charging/import."
             )
         else:
             st.caption(
-                "Tomorrow's schedule is shown exactly as returned by the API because "
+                "Tomorrow's schedule is used exactly as returned by the API because "
                 "it already matches the uploaded Europe/Ljubljana schedule. "
-                "Sign convention: negative = discharging/export, positive = charging/import."
+                "Negative = discharging/export; positive = charging/import."
             )
 
 
