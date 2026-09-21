@@ -764,28 +764,25 @@ def render_flow_card(
         else ""
     )
 
-    st.markdown(
-        f"""
-        <div class="flow-card">
-            <div class="card-label">
-                {label}
-                <span class="signal-chip">{meter}</span>
-            </div>
-
-            <div class="flow-value">{fmt_kw(current_kw)}</div>
-            <div style="font-size:1.15rem;font-weight:700;margin-top:-.15rem;margin-bottom:.35rem;">
-                {fmt_kwh(current_kwh)}
-            </div>
-
-            <div class="small-note">
-                Current 15-min interval: average power so far + accumulated energy{capacity_text}<br>
-                Previous full 15 min: {fmt_kw(previous_kw)} · {fmt_kwh(previous_kwh)}<br>
-                Signal: {signal}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # Keep the HTML compact and left-aligned. Indented multiline HTML mixed
+    # with blank lines can be interpreted by Markdown as a code block.
+    html = (
+        f'<div class="flow-card">'
+        f'<div class="card-label">{label}'
+        f'<span class="signal-chip">{meter}</span></div>'
+        f'<div class="flow-value">{fmt_kw(current_kw)}</div>'
+        f'<div style="font-size:1.15rem;font-weight:700;'
+        f'margin-top:-.15rem;margin-bottom:.35rem;">'
+        f'{fmt_kwh(current_kwh)}</div>'
+        f'<div class="small-note">'
+        f'Current 15-min interval: average power so far + accumulated energy'
+        f'{capacity_text}<br>'
+        f'Previous full 15 min: {fmt_kw(previous_kw)} · {fmt_kwh(previous_kwh)}<br>'
+        f'Signal: {signal}'
+        f'</div></div>'
     )
+
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_site_grid(readings: dict[str, dict[str, Any]]) -> None:
